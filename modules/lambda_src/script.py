@@ -1,6 +1,7 @@
 import requests as r
 from dotenv import load_dotenv
 import os
+from datetime import date, datetime
 
 load_dotenv() # Load .env variables
 
@@ -143,10 +144,73 @@ def get_my_profile(access_token):
 
     return response.json()
 
+def parse_tracks(tracks_response):
+    """
+    Transforms the raw /me/tracks API response into the rows needed for the
+    `tracks` and `track_snapshots` tables.
+
+    Args:
+        tracks_response (dict): The raw JSON returned by get_my_tracks().
+
+    Returns:
+        tuple[list[dict], list[dict]]: (tracks_rows, snapshot_rows)
+    """
+    today = date.today()
+    tracks_rows = []
+    snapshots_rows = []
+
+    for track in tracks_response["collection"]:
+        # Add track row for Tracks Table (General Information of the Track)
+        tracks_rows.append({
+            "track_id": track["id"],
+            "title": track["title"],
+            "genre": track["genre"] or None,
+            "created_at": datetime.strptime(track["created_at"], "%Y/%m/%d %H:%M:%S %z")
+        })
+
+        # Add track row for Snapshots Table (Today's Numbers of the Track)
+        snapshots_rows.append({
+            "track_id": track["id"],
+            "snapshot_date": today,
+            "playback_count": track["playback_count"],
+            "favoritings_count": track["favoritings_count"],
+            "reposts_count": track["reposts_count"],
+            "comment_count": track["comment_count"],
+            "download_count": track["download_count"]
+        })
+
+    return tracks_rows, snapshots_rows
+
+def parse_profile(profile_response):
+    """
+    Transforms the raw /me API response into the row needed for the
+    `account_snapshots` table.
+
+    Args:
+        profile_response (dict): The raw JSON returned by get_my_profile().
+
+    Returns:
+        dict: A single row ready to insert into account_snapshots.
+    """
+    profile = {
+        "snapshot_date": date.today(),
+        "followers_count": profile_response["followers_count"],
+        "followings_count": profile_response["followings_count"],
+        "public_favorites_count": profile_response["public_favorites_count"],
+        "reposts_count": profile_response["reposts_count"]
+    }
+
+    return profile
+
 if __name__ == "__main__":
     access_token, refresh_token = connect()
 
-    get_my_tracks(access_token)
-    print(f"\n\n------\n\n")
-    get_my_profile(access_token)
+    profile = parse_profile(get_my_profile(access_token))
+    tracks, snapshots = parse_tracks(get_my_tracks(access_token))
+
+    print(profile)
+    print(f"\n\n----------\n\n")
+    print(tracks)
+    print(f"\n\n----------\n\n")
+    print(snapshots)
 

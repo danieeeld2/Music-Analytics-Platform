@@ -40,6 +40,36 @@ See [docs/adr/](./docs/adr/) for the reasoning behind each architecture decision
 
 ### Project Structure
 
+```text
+.
+├── modules/
+│   ├── lambda_src/       # Python ingestion pipeline (SoundCloud -> RDS)
+│   │   ├── script.py
+│   │   ├── get_initial_token.py
+│   │   ├── test_script.py
+│   │   └── requirements.txt
+│   └── rds/
+│       └── schema.sql    # Database schema (tracks, track_snapshots, account_snapshots)
+├── docs/
+│   ├── adr/              # Architecture decision records
+│   └── images/
+├── .github/workflows/    # CI: automated tests on every PR
+└── README.md
+```
+
+*This tree reflects what exists today.*
+
+### Setup / Deployment
+
+### What this demonstrates
+
+- OAuth2 authentication with a rotating, single-use refresh token (a non-trivial pattern requiring persistence across executions (see ADR 0007))
+- API integration and data parsing with defensive handling of inconsistent fields (e.g. normalizing empty strings to `NULL`)
+- Idempotent database writes (`ON CONFLICT DO NOTHING`) to safely support re-runs
+- Automated testing (pytest) and CI (GitHub Actions) for the ingestion logic
+- Documented architecture decisions and trade-offs (ADRs) throughout the project
+- *(To come: Infrastructure as Code with Terraform, remote state management, event-driven serverless architecture)*
+
 ### Setup / Deployment
 
 ### What this demostrates

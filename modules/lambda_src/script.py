@@ -1,0 +1,83 @@
+import requests as r
+from dotenv import load_dotenv
+import os
+
+load_dotenv() # Load .env variables
+
+# See API documentation for checking this URLs
+TOKEN_URL = "https://secure.soundcloud.com/oauth/token"
+
+def connect():
+    """
+    Authenticates against SoundCloud API using Client Credentials flow.
+    Docs: https://developers.soundcloud.com/docs/api/guide#authentication - See Refreshing Tokens part
+
+    Returns:
+        tuple[str, str]: (access_token, refresh_token). the refresh_token must be persisted, replacing the old one
+
+    Raises:
+        ValueError: If client_id or client_secret or refresh_token are missing
+        RuntimeError: If the token request fails (non 200)
+    """
+    # Read .env secrets
+    client_id = os.environ.get("SOUNDCLOUD_CLIENT_ID")
+    client_secret = os.environ.get("SOUNDCLOUD_CLIENT_SECRET")
+    refresh_token = os.environ.get("SOUNDCLOUD_REFRESH_TOKEN")
+
+    if not client_id or not client_secret or not refresh_token:
+        raise ValueError("Missing API Key parameters")
+
+    # Get Access Token
+    response = r.post(
+        TOKEN_URL,
+        data = {
+            "grant_type" : "refresh_token",
+            "client_id" : client_id,
+            "client_secret" : client_secret,
+            "refresh_token" : refresh_token
+        },
+        headers = {"accept" : "application/json; charset=utf-8"}
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to authenticate: {response.status_code} - {response.text}")
+
+    access_token = response.json()["access_token"]
+    new_refresh_token = response.json()["refresh_token"]
+
+    save_refresh_token(new_refresh_token)
+
+    return access_token, new_refresh_token
+
+def save_refresh_token(token, env_path=".env"):
+    """
+    Overwrites SOUNDCLOUD_REFRESH_TOKEN in .env file with new value, since SoundCloud invalidates the old
+    token on every use
+
+    Args:
+        token (str): The new token
+        env_path (str): Path to .env file
+    """
+    with open(env_path, "r") as f:
+        lines = f.readlines()
+
+    updated_lines = []
+    found = False
+
+    for line in lines:
+        if line.startswith("SOUNDCLOUD_REFRESH_TOKEN="):
+            updated_lines.append(f"SOUNDCLOUD_REFRESH_TOKEN={token}\n")
+            found = True
+        else:
+            updated_lines.append(line)
+
+    if not found:
+        updated_lines.append(f"SOUNDCLOUD_REFRESH_TOKEN={token}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(updated_lines)
+
+
+if __name__ == "__main__":
+    connect()
+

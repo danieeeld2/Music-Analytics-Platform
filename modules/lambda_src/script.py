@@ -1,3 +1,8 @@
+# TODO: connect() and save_refresh_token() currently read/write to .env,
+# which only works for local runs. Before deploying to Lambda, this needs
+# to be adapted to use AWS Parameter Store (boto3 ssm.get_parameter /
+# put_parameter) instead. See discussion in PR #X.
+
 import requests as r
 from dotenv import load_dotenv
 import os

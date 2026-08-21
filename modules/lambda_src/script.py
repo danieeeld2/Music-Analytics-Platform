@@ -61,6 +61,9 @@ def save_refresh_token(token, env_path=".env"):
     with open(env_path, "r") as f:
         lines = f.readlines()
 
+    # Ensure every line ends with a newline
+    lines = [line if line.endswith("\n") else line + "\n" for line in lines]
+
     updated_lines = []
     found = False
 
@@ -77,7 +80,73 @@ def save_refresh_token(token, env_path=".env"):
     with open(env_path, "w") as f:
         f.writelines(updated_lines)
 
+def get_my_tracks(access_token):
+    """
+    API call to endpoint /me/tracks — fetches the list of the authenticated
+    user's tracks, including per-track engagement counters.
+
+    Args:
+        access_token (str): Authentication token generated at connect() (valid for 1 hour)
+
+    Returns:
+        dict: Parsed JSON response. Key fields per track (inside "collection"):
+            id, title, playback_count, favoritings_count, reposts_count,
+            comment_count, download_count, created_at.
+
+    Raises:
+        RuntimeError: If the request fails (non-200 response).
+    """
+    url = 'https://api.soundcloud.com/me/tracks?limit=200&sort=desc&linked_partitioning=true'
+    token = "OAuth " + access_token
+
+    response = r.get(
+        url,
+        headers = {
+            "accept" : "application/json; charset=utf-8",
+            "Authorization" : token
+        }
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to fetch tracks: {response.status_code} - {response.text}")
+
+    return response.json()
+
+def get_my_profile(access_token):
+    """
+    API call to endpoint /me — fetches the authenticated user's own profile
+    and account-level counters.
+
+    Args:
+        access_token (str): Authentication token generated at connect() (valid for 1 hour)
+
+    Returns:
+        dict: Parsed JSON response. Key fields:
+            followers_count, followings_count, public_favorites_count, reposts_count.
+
+    Raises:
+        RuntimeError: If the request fails (non-200 response).
+    """
+    url = 'https://api.soundcloud.com/me'
+    token = "OAuth " + access_token
+
+    response = r.get(
+        url,
+        headers = {
+            "accept" : "application/json; charset=utf-8",
+            "Authorization" : token
+        }
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to fetch tracks: {response.status_code} - {response.text}")
+
+    return response.json()
 
 if __name__ == "__main__":
-    connect()
+    access_token, refresh_token = connect()
+
+    get_my_tracks(access_token)
+    print(f"\n\n------\n\n")
+    get_my_profile(access_token)
 

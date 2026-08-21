@@ -70,10 +70,6 @@ See [docs/adr/](./docs/adr/) for the reasoning behind each architecture decision
 - Documented architecture decisions and trade-offs (ADRs) throughout the project
 - *(To come: Infrastructure as Code with Terraform, remote state management, event-driven serverless architecture)*
 
-### Setup / Deployment
-
-### What this demostrates
-
 ### Screenshots
 
 ### License

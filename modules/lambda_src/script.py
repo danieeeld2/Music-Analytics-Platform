@@ -7,6 +7,7 @@ import requests as r
 from dotenv import load_dotenv
 import os
 from datetime import date, datetime
+import psycopg2
 
 load_dotenv() # Load .env variables
 
@@ -207,15 +208,104 @@ def parse_profile(profile_response):
 
     return profile
 
+def get_db_connection():
+    """
+    Opens a connection to the Postgres database using credentials from .env.
+    Works against local Postgres (Docker) today; will point to RDS once
+    that's provisioned.
+
+    Returns:
+        psycopg2.extensions.connection: An open database connection.
+    
+    Raises:
+        ValueError: If any required DB credential is missing from the environment.
+    """
+    db_host = os.environ.get("DB_HOST")
+    db_port = os.environ.get("DB_PORT", "5432")
+    db_name = os.environ.get("DB_NAME")
+    db_user = os.environ.get("DB_USER")
+    db_password = os.environ.get("DB_PASSWORD")
+
+    if not all([db_host, db_name, db_user, db_password]):
+        raise ValueError("Missing database credentials in .env")
+
+    connection = psycopg2.connect(
+        host=db_host,
+        port=db_port,
+        dbname=db_name,
+        user=db_user,
+        password=db_password,
+    )
+
+    return connection
+
+def insert_tracks(bd_connection, tracks_rows):
+    """
+    Inserts new tracks into the `tracks` table.
+
+    Args:
+        bd_connection: An open psycopg2 connection
+        tracks_row (list[dict]): Rows produced by parse_track()
+    """
+    with bd_connection.cursor() as c:
+        for r in tracks_rows:
+            c.execute(
+                """
+                INSERT INTO tracks (track_id, title, genre, created_at)
+                VALUES (%(track_id)s, %(title)s, %(genre)s, %(created_at)s)
+                ON CONFLICT (track_id) DO NOTHING;
+                """,
+                r
+            )
+    bd_connection.commit()
+
+def insert_track_snapshots(bd_connection, snapshot_rows):
+    """
+    Inserts a new snapshot from a existent track into the `track_snapshots` table.
+
+    Args:
+        bd_connection: An open psycopg2 connection
+        snapshot_rows (list[dict]): Rows produced by parse_track()
+    """
+    with bd_connection.cursor() as c:
+        for r in snapshot_rows:
+            c.execute(
+                """
+                INSERT INTO track_snapshots (track_id, snapshot_date, playback_count, favoritings_count, reposts_count, comment_count, download_count)
+                VALUES (%(track_id)s, %(snapshot_date)s, %(playback_count)s, %(favoritings_count)s,%(reposts_count)s, %(comment_count)s, %(download_count)s)
+                ON CONFLICT (track_id, snapshot_date) DO NOTHING;
+                """,
+                r
+            )
+    bd_connection.commit()
+
+def insert_account_snapshot(bd_connection, account_row):
+    """
+    Inserts a new snapshot from the account into the `account_snapshots` table.
+
+    Args:
+        bd_connection: An open psycopg2 connection
+        account_row (dict): Row produced by parse_profile()
+    """
+    with bd_connection.cursor() as c:
+        c.execute(
+            """
+            INSERT INTO account_snapshots (snapshot_date, followers_count, followings_count, public_favorites_count, reposts_count)
+            VALUES (%(snapshot_date)s, %(followers_count)s, %(followings_count)s, %(public_favorites_count)s, %(reposts_count)s)
+            ON CONFLICT (snapshot_date) DO NOTHING;
+            """,
+            account_row
+        )
+    bd_connection.commit()
+
+
 if __name__ == "__main__":
     access_token, refresh_token = connect()
 
-    profile = parse_profile(get_my_profile(access_token))
-    tracks, snapshots = parse_tracks(get_my_tracks(access_token))
+    account_row = parse_profile(get_my_profile(access_token))
+    tracks_rows, snapshots_rows = parse_tracks(get_my_tracks(access_token))
 
-    print(profile)
-    print(f"\n\n----------\n\n")
-    print(tracks)
-    print(f"\n\n----------\n\n")
-    print(snapshots)
-
+    with get_db_connection() as connection:
+        insert_tracks(connection, tracks_rows)
+        insert_track_snapshots(connection, snapshots_rows)
+        insert_account_snapshot(connection, account_row)

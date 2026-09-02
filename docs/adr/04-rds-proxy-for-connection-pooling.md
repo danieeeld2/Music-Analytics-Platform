@@ -1,6 +1,6 @@
 # ADR 04: Use RDS Proxy for connection pooling
 
-**Status: Accepted**
+**Status: Superseded by [ADR 09](./09-remove-rds-proxy.md)**
 
 ---
 

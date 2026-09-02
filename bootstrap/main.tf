@@ -1,3 +1,8 @@
+# ============================================================
+# Bootstrap — creates the S3 bucket + DynamoDB table used as
+# the remote backend for the main Terraform configuration.
+# ============================================================
+
 terraform {
   required_version = ">= 1.5"
 
@@ -11,6 +16,14 @@ terraform {
 
 provider "aws" {
   region = "eu-west-1"
+
+  default_tags {
+    tags = {
+      Project   = "music-analytics-platform"
+      ManagedBy = "terraform"
+      Component = "bootstrap"
+    }
+  }
 }
 
 resource "aws_s3_bucket" "tfstate_bucket" {

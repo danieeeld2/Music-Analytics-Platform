@@ -61,4 +61,4 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
-.env
+.envlambda_layer/

@@ -291,14 +291,35 @@ def insert_account_snapshot(bd_connection, account_row):
         )
     bd_connection.commit()
 
+def lambda_handler(event, context):
+    """
+    Entry point for the Lambda function. Runs the full daily ingestion pipeline: authenticate, fetch data from SoundCloud, and store it in RDS.
+
+    Args:
+        event: Event data passed by the trigger (unused, this Lambda is triggered by a plain EventBridge schedule with no payload).
+        context: Lambda runtime information (unused).
+
+    Returns:
+        dict: statusCode 200 on success, 500 on failure, with a body describing the outcome.
+    """
+    try:
+        access_token, refresh_token = connect()
+
+        account_row = parse_profile(get_my_profile(access_token))
+        tracks_rows, snapshots_rows = parse_tracks(get_my_tracks(access_token))
+
+        with get_db_connection() as connection:
+            insert_tracks(connection, tracks_rows)
+            insert_track_snapshots(connection, snapshots_rows)
+            insert_account_snapshot(connection, account_row)
+
+        return {"statusCode": 200, "body": "Ingestion completed successfully"}
+
+    except Exception as e:
+        print(f"Ingestion failed: {e}")
+        return {"statusCode": 500, "body": f"Ingestion failed: {e}"}
+
 
 if __name__ == "__main__":
-    access_token, refresh_token = connect()
-
-    account_row = parse_profile(get_my_profile(access_token))
-    tracks_rows, snapshots_rows = parse_tracks(get_my_tracks(access_token))
-
-    with get_db_connection() as connection:
-        insert_tracks(connection, tracks_rows)
-        insert_track_snapshots(connection, snapshots_rows)
-        insert_account_snapshot(connection, account_row)
+    # For trying locally
+    lambda_handler(None, None)

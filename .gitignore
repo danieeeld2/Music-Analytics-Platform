@@ -62,3 +62,4 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+lambda_layer/

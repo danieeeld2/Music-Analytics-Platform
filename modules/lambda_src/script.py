@@ -1,23 +1,27 @@
-# TODO: connect() and save_refresh_token() currently read/write to .env,
-# which only works for local runs. Before deploying to Lambda, this needs
-# to be adapted to use AWS Parameter Store (boto3 ssm.get_parameter /
-# put_parameter) instead. See discussion in PR #X.
-
 import requests as r
-from dotenv import load_dotenv
 import os
 from datetime import date, datetime
 import psycopg2
+import boto3
+import json
+from dotenv import load_dotenv
 
-load_dotenv() # Load .env variables
+load_dotenv()
+
+# Two different clients on purpose: SoundCloud credentials live in Parameter Store (free, no rotation needed), while the RDS password lives in Secrets Manager because that's where AWS puts it automatically when manage_master_user_password is enabled in Terraform. 
+# Merging both into Secrets Manager would add real monthly cost for the SoundCloud parameters with no actual benefit.
+ssm = boto3.client("ssm", region_name = "eu-west-1") #ParameterStore
+secretsmanager = boto3.client("secretsmanager", region_name="eu-west-1") #SecretsManager
 
 # See API documentation for checking this URLs
 TOKEN_URL = "https://secure.soundcloud.com/oauth/token"
 
 def connect():
     """
-    Authenticates against SoundCloud API using Client Credentials flow.
+    Authenticates against SoundCloud API using the Refresh Token flow.
     Docs: https://developers.soundcloud.com/docs/api/guide#authentication - See Refreshing Tokens part
+
+    Reads client_id, client_secret and refresh_token from Parameter Store.
 
     Returns:
         tuple[str, str]: (access_token, refresh_token). the refresh_token must be persisted, replacing the old one
@@ -26,10 +30,19 @@ def connect():
         ValueError: If client_id or client_secret or refresh_token are missing
         RuntimeError: If the token request fails (non 200)
     """
-    # Read .env secrets
-    client_id = os.environ.get("SOUNDCLOUD_CLIENT_ID")
-    client_secret = os.environ.get("SOUNDCLOUD_CLIENT_SECRET")
-    refresh_token = os.environ.get("SOUNDCLOUD_REFRESH_TOKEN")
+    # Read secrets from ParameterStore with boto3
+    client_id = ssm.get_parameter(
+        Name="/music-analytics/soundcloud/client_id",
+        WithDecryption=True
+    )['Parameter']['Value']
+    client_secret = ssm.get_parameter(
+        Name="/music-analytics/soundcloud/client_secret",
+        WithDecryption=True
+    )['Parameter']['Value']
+    refresh_token = ssm.get_parameter(
+        Name="/music-analytics/soundcloud/refresh_token",
+        WithDecryption=True
+    )['Parameter']['Value']
 
     if not client_id or not client_secret or not refresh_token:
         raise ValueError("Missing API Key parameters")
@@ -56,36 +69,19 @@ def connect():
 
     return access_token, new_refresh_token
 
-def save_refresh_token(token, env_path=".env"):
+def save_refresh_token(token):
     """
-    Overwrites SOUNDCLOUD_REFRESH_TOKEN in .env file with new value, since SoundCloud invalidates the old
-    token on every use
+    Overwrites the SOUNDCLOUD_REFRESH_TOKEN parameter in Parameter Store with the new value, since SoundCloud invalidates the old token on every use.
 
     Args:
-        token (str): The new token
-        env_path (str): Path to .env file
+        token (str): The new refresh_token to persist.
     """
-    with open(env_path, "r") as f:
-        lines = f.readlines()
-
-    # Ensure every line ends with a newline
-    lines = [line if line.endswith("\n") else line + "\n" for line in lines]
-
-    updated_lines = []
-    found = False
-
-    for line in lines:
-        if line.startswith("SOUNDCLOUD_REFRESH_TOKEN="):
-            updated_lines.append(f"SOUNDCLOUD_REFRESH_TOKEN={token}\n")
-            found = True
-        else:
-            updated_lines.append(line)
-
-    if not found:
-        updated_lines.append(f"SOUNDCLOUD_REFRESH_TOKEN={token}\n")
-
-    with open(env_path, "w") as f:
-        f.writelines(updated_lines)
+    ssm.put_parameter(
+        Name="/music-analytics/soundcloud/refresh_token",
+        Value=token,
+        Type="SecureString",
+        Overwrite=True
+    )
 
 def get_my_tracks(access_token):
     """
@@ -152,8 +148,7 @@ def get_my_profile(access_token):
 
 def parse_tracks(tracks_response):
     """
-    Transforms the raw /me/tracks API response into the rows needed for the
-    `tracks` and `track_snapshots` tables.
+    Transforms the raw /me/tracks API response into the rows needed for the `tracks` and `track_snapshots` tables.
 
     Args:
         tracks_response (dict): The raw JSON returned by get_my_tracks().
@@ -210,31 +205,29 @@ def parse_profile(profile_response):
 
 def get_db_connection():
     """
-    Opens a connection to the Postgres database using credentials from .env.
-    Works against local Postgres (Docker) today; will point to RDS once
-    that's provisioned.
+    Opens a connection to the Postgres database. Host is read from an environment variable (set by Terraform as a Lambda env var), and credentials are read from the Secrets Manager secret auto-generated by RDS (manage_master_user_password).
 
     Returns:
         psycopg2.extensions.connection: An open database connection.
-    
+
     Raises:
-        ValueError: If any required DB credential is missing from the environment.
+        ValueError: If the DB_HOST env var or the DB secret ARN are missing.
     """
     db_host = os.environ.get("DB_HOST")
-    db_port = os.environ.get("DB_PORT", "5432")
-    db_name = os.environ.get("DB_NAME")
-    db_user = os.environ.get("DB_USER")
-    db_password = os.environ.get("DB_PASSWORD")
+    db_secret_arn = os.environ.get("DB_SECRET_ARN")
 
-    if not all([db_host, db_name, db_user, db_password]):
-        raise ValueError("Missing database credentials in .env")
+    if not db_host or not db_secret_arn:
+        raise ValueError("Missing DB_HOST or DB_SECRET_ARN environment variables")
+
+    secret_response = secretsmanager.get_secret_value(SecretId=db_secret_arn)
+    secret = json.loads(secret_response["SecretString"])
 
     connection = psycopg2.connect(
         host=db_host,
-        port=db_port,
-        dbname=db_name,
-        user=db_user,
-        password=db_password,
+        port=5432,
+        dbname="soundcloud_data_db",
+        user=secret["username"],
+        password=secret["password"],
     )
 
     return connection
@@ -248,14 +241,14 @@ def insert_tracks(bd_connection, tracks_rows):
         tracks_row (list[dict]): Rows produced by parse_track()
     """
     with bd_connection.cursor() as c:
-        for r in tracks_rows:
+        for row in tracks_rows:
             c.execute(
                 """
                 INSERT INTO tracks (track_id, title, genre, created_at)
                 VALUES (%(track_id)s, %(title)s, %(genre)s, %(created_at)s)
                 ON CONFLICT (track_id) DO NOTHING;
                 """,
-                r
+                row
             )
     bd_connection.commit()
 
@@ -268,14 +261,14 @@ def insert_track_snapshots(bd_connection, snapshot_rows):
         snapshot_rows (list[dict]): Rows produced by parse_track()
     """
     with bd_connection.cursor() as c:
-        for r in snapshot_rows:
+        for row in snapshot_rows:
             c.execute(
                 """
                 INSERT INTO track_snapshots (track_id, snapshot_date, playback_count, favoritings_count, reposts_count, comment_count, download_count)
                 VALUES (%(track_id)s, %(snapshot_date)s, %(playback_count)s, %(favoritings_count)s,%(reposts_count)s, %(comment_count)s, %(download_count)s)
                 ON CONFLICT (track_id, snapshot_date) DO NOTHING;
                 """,
-                r
+                row
             )
     bd_connection.commit()
 
@@ -298,14 +291,35 @@ def insert_account_snapshot(bd_connection, account_row):
         )
     bd_connection.commit()
 
+def lambda_handler(event, context):
+    """
+    Entry point for the Lambda function. Runs the full daily ingestion pipeline: authenticate, fetch data from SoundCloud, and store it in RDS.
+
+    Args:
+        event: Event data passed by the trigger (unused, this Lambda is triggered by a plain EventBridge schedule with no payload).
+        context: Lambda runtime information (unused).
+
+    Returns:
+        dict: statusCode 200 on success, 500 on failure, with a body describing the outcome.
+    """
+    try:
+        access_token, refresh_token = connect()
+
+        account_row = parse_profile(get_my_profile(access_token))
+        tracks_rows, snapshots_rows = parse_tracks(get_my_tracks(access_token))
+
+        with get_db_connection() as connection:
+            insert_tracks(connection, tracks_rows)
+            insert_track_snapshots(connection, snapshots_rows)
+            insert_account_snapshot(connection, account_row)
+
+        return {"statusCode": 200, "body": "Ingestion completed successfully"}
+
+    except Exception as e:
+        print(f"Ingestion failed: {e}")
+        return {"statusCode": 500, "body": f"Ingestion failed: {e}"}
+
 
 if __name__ == "__main__":
-    access_token, refresh_token = connect()
-
-    account_row = parse_profile(get_my_profile(access_token))
-    tracks_rows, snapshots_rows = parse_tracks(get_my_tracks(access_token))
-
-    with get_db_connection() as connection:
-        insert_tracks(connection, tracks_rows)
-        insert_track_snapshots(connection, snapshots_rows)
-        insert_account_snapshot(connection, account_row)
+    # For trying locally
+    lambda_handler(None, None)

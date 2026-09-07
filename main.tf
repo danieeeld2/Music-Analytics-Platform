@@ -210,8 +210,8 @@ resource "aws_db_instance" "rds_db" {
 # not just its filename. Without it, rebuilding layer.zip with different
 # dependencies wouldn't trigger a new Layer version on apply.
 resource "aws_lambda_layer_version" "lambda_function_dependencies" {
-  filename   = "./lambda_layer/layer.zip"
-  layer_name = "lambda_function_dependencies"
+  filename         = "./lambda_layer/layer.zip"
+  layer_name       = "lambda_function_dependencies"
   source_code_hash = filebase64sha256("./lambda_layer/layer.zip") # Look if dependencies changed since last time
 
   compatible_runtimes = ["python3.10"]
@@ -221,20 +221,20 @@ resource "aws_lambda_layer_version" "lambda_function_dependencies" {
 # manually rebuild the code package by hand like layer.zip (which only
 # changes when dependencies change, not on every code edit).
 data "archive_file" "lambda_code" {
-  type = "zip"
+  type        = "zip"
   source_file = "./modules/lambda_src/script.py"
   output_path = "./modules/lambda_src/function.zip"
 }
 
 resource "aws_lambda_function" "ingestion_lambda_function" {
-  filename = data.archive_file.lambda_code.output_path
-  function_name = "ingestion_lambda_function"
-  role = aws_iam_role.lambda_role.arn
-  runtime = "python3.10"
-  handler = "script.lambda_handler"
+  filename         = data.archive_file.lambda_code.output_path
+  function_name    = "ingestion_lambda_function"
+  role             = aws_iam_role.lambda_role.arn
+  runtime          = "python3.10"
+  handler          = "script.lambda_handler"
   source_code_hash = data.archive_file.lambda_code.output_base64sha256
-  timeout = 300
-  layers = [aws_lambda_layer_version.lambda_function_dependencies.arn]
+  timeout          = 300
+  layers           = [aws_lambda_layer_version.lambda_function_dependencies.arn]
 
   environment {
     variables = {

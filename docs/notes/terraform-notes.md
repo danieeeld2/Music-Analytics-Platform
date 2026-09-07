@@ -1,4 +1,4 @@
-# Terraform Notes - IAM, RDS & Bootstrap
+# Terraform Notes - IAM, RDS, Lambda & Bootstrap
 
 > Personal notes on the Terraform work done for this project: what each block does, why it is written this way, and the problems I found along the way. Mostly for my own future reference. I am still learning Terraform, so I wrote down almost everything that was new or that tripped me up, even small things.
 
@@ -12,7 +12,7 @@ There are two separate Terraform configurations in this repo, each with its own 
 .
 ├── bootstrap/
 │   └── main.tf      # S3 bucket + DynamoDB table, LOCAL state
-└── main.tf           # IAM + RDS, REMOTE state (backend "s3")
+└── main.tf           # IAM + RDS + Lambda, REMOTE state (backend "s3")
 ```
 
 Why two separate configurations? Terraform cannot use a backend before that backend exists. `bootstrap/` solves this by being applied once, manually, with local state. It creates the S3 bucket and DynamoDB table that the main configuration then uses as its remote backend.
@@ -131,15 +131,15 @@ aws_db_instance.rds_db.master_user_secret[0].secret_arn
 
 Note the `[0]`. This attribute is a list with one element, not a plain object, which is not obvious the first time you see it.
 
-### Security Group, ingress vs egress, and the two rules I needed
+### Security Group, ingress vs egress
 
-Ingress (inbound) is who can reach RDS. Restricted to my own public IP (`/32` means exactly this IP, no range) per ADR 03.
-
-Egress (outbound) is traffic leaving RDS. Security Groups block all outbound traffic by default unless you open it explicitly. I left this fully open (`0.0.0.0/0`, all ports), since the real protection here comes from the strict ingress rule, not from egress.
+Ingress (inbound) is who can reach RDS. Egress (outbound) is traffic leaving RDS. Security Groups block all outbound traffic by default unless you open it explicitly. I left egress fully open (`0.0.0.0/0`, all ports), since the real protection here comes from the ingress rules, not from egress.
 
 My own IP can change over time. If `psql` or the ingestion script suddenly cannot connect, the first thing to check is `curl -4 ifconfig.me`, before assuming something is broken in Terraform.
 
 Grafana Cloud's IP is deliberately not hardcoded here. Their published ranges can change, so per ADR 08 I fetch them right before each demo session instead of keeping a permanent rule for them.
+
+I originally only allowed my own IP on ingress (ADR 03), but this had to change once Lambda entered the picture. See section 6 below.
 
 ### engine_version, do not assume a version exists
 
@@ -187,71 +187,150 @@ Lesson: `terraform plan` and `terraform validate` only check syntax and internal
 
 ---
 
-## 6. Debugging tools that actually helped
+## 6. Lambda function and Layer
+
+### The Layer, what it actually is
+
+A Layer is just a separate zip with dependencies, attached to the function, instead of bundling everything (code plus dependencies) into a single package. Lambda expects a very specific folder structure inside the zip: a top level folder literally called `python/`, with the installed packages inside it.
+
+```bash
+mkdir -p lambda_layer/python
+pip install -r requirements.txt -t lambda_layer/python/
+cd lambda_layer && zip -r layer.zip python && cd ..
+```
+
+Wrote this as `build_layer.sh` so I do not have to remember the exact commands every time dependencies change.
+
+Note: this uses the full `requirements.txt`, which also has `boto3` and `pytest` in it. `boto3` is already preinstalled in the Lambda runtime and `pytest` is dev only, so the zip ends up a bit bigger than strictly needed. Kept it simple with one requirements file instead of maintaining a second one just for the layer.
+
+### source_code_hash on the layer
+
+```hcl
+resource "aws_lambda_layer_version" "lambda_function_dependencies" {
+  filename          = "./lambda_layer/layer.zip"
+  layer_name        = "lambda_function_dependencies"
+  source_code_hash  = filebase64sha256("./lambda_layer/layer.zip")
+  compatible_runtimes = ["python3.10"]
+}
+```
+
+`filebase64sha256()` reads the file and hashes its content. This is what lets Terraform notice that the zip changed even though its filename stayed the same, so it knows to publish a new Layer version on apply. Same idea I already knew from the Lambda function code hash below, just calculated manually here instead of coming from a data source.
+
+### archive_file, so I do not zip the code by hand
+
+```hcl
+data "archive_file" "lambda_code" {
+  type        = "zip"
+  source_file = "./modules/lambda_src/script.py"
+  output_path = "./modules/lambda_src/function.zip"
+}
+```
+
+This is a `data` source from the `hashicorp/archive` provider (had to add it to `required_providers`). It zips `script.py` automatically on every `plan`/`apply`, so unlike the Layer, I never have to rebuild this one by hand when I edit the code. `output_base64sha256` on this data source gives me the hash directly, no need for `filebase64sha256()` here.
+
+### The bug that cost me the most time here: missing `layers` argument
+
+Wrote the whole `aws_lambda_function` block, `terraform plan` showed everything resolving fine, `apply` succeeded with no errors. First invoke:
+
+```
+{"errorMessage": "Unable to import module 'script': No module named 'requests'", "errorType": "Runtime.ImportModuleError"}
+```
+
+Checked the zip content with `unzip -l lambda_layer/layer.zip`, `requests` was there, correctly under `python/`. Checked the Layer version history in AWS, it existed too. The actual problem: I had simply never written the `layers = [...]` argument inside `aws_lambda_function` in the first place. Nothing was wrong with the Layer itself, the function just never referenced it. `terraform plan` does not warn you about a Lambda function with zero layers, since that is a perfectly valid (if useless, in this case) configuration.
+
+```hcl
+layers = [aws_lambda_layer_version.lambda_function_dependencies.arn]
+```
+
+Confirmed with:
+```bash
+aws lambda get-function-configuration --function-name ingestion_lambda_function --region eu-west-1 --query "Layers"
+```
+which returned `null` before the fix.
+
+### handler format
+
+```hcl
+handler = "script.lambda_handler"
+```
+
+Format is `filename_without_extension.function_name`. My file is `script.py`, my entry point function is `lambda_handler`, so `script.lambda_handler`.
+
+### timeout
+
+Default Lambda timeout is only 3 seconds, way too short for an HTTP call plus DB inserts. Set `timeout = 300` (5 minutes), more than enough margin for this pipeline, which realistically takes a few seconds.
+
+### Runtime version must match the Layer's build environment
+
+`compatible_runtimes` on the Layer and `runtime` on the function both need to match the Python version I actually built the Layer with locally (`python3.10` in my case), or `psycopg2-binary`'s compiled binary parts might not work once deployed. Kept both pinned to `python3.10` to avoid this entirely.
+
+---
+
+## 7. Lambda has no fixed IP: had to reopen RDS ingress
+
+First real invoke got past the import error, then failed again:
+
+```
+connection to server at "..." (52.209.242.80), port 5432 failed: Connection timed out
+```
+
+The Security Group only allowed my own IP (ADR 03). Lambda, running outside a custom VPC, does not have a fixed or predictable public IP, so it got blocked just like any other unknown IP would.
+
+Considered putting the Lambda inside the same VPC as RDS, but that would mean either a NAT Gateway (real fixed monthly cost, exactly what ADR 03 was trying to avoid) or a public subnet with an Elastic IP (extra networking complexity for no real security gain here). Ended up just opening RDS ingress to `0.0.0.0/0` on port 5432 instead, see ADR 10 for the full writeup. Security now relies entirely on the Secrets Manager-generated password, not on network restriction. A conscious tradeoff for a project like this, not something I would do with real user data in production.
+
+---
+
+## 8. Debugging tools that actually helped
 
 `terraform validate` catches syntax errors, wrong argument names, and type mismatches, for example passing a single value where a list is expected. It never touches AWS at all.
 
-`terraform plan` resolves the data sources and shows exactly what would be created, changed, or destroyed, without applying anything. This is what caught some of my wrong resource references early, like pointing to the wrong IAM role.
+`terraform plan` resolves the data sources and shows exactly what would be created, changed, or destroyed, without applying anything. This is what caught some of my wrong resource references early, like pointing to the wrong IAM role. It did NOT catch the missing `layers` argument bug above though, since an empty layers list is valid Terraform, just not what I actually wanted.
 
 `terraform fmt -recursive` reformats everything to Terraform's standard 2 space style. I naturally write with 4 spaces, so I run this before every commit to keep the diff clean and to pass CI's `fmt -check`.
 
 `aws sts get-caller-identity` confirms which IAM user or role is actually running Terraform right now. Useful when debugging permission errors, since it tells you exactly who is being denied what.
 
+`aws lambda get-function-configuration --query "Layers"` was the command that actually confirmed the Layer was not attached, when I was still assuming the problem was inside the zip itself.
+
 ---
 
-## 7. AWS CLI quirks found while testing the RDS connection by hand
+## 9. AWS CLI quirks found while testing manually
 
 Secret ARNs containing `!`, for example `rds!db-6cc4fd1e-...`, break inside double quoted bash strings. Bash reads `!` as history expansion and throws an `event not found` error. Fix is to use single quotes around the ARN instead.
 
 `aws secretsmanager` commands need an explicit `--region`. Without it, `list-secrets` or `get-secret-value` can quietly return empty or not found results even though the secret exists, if the CLI's default region does not match.
 
-Passwords generated by `manage_master_user_password` contain shell special characters like `!`, `(`, `*`, `[`, `~`. Never pass them directly on the command line, let `psql` prompt for the password interactively instead.
+Passwords generated by `manage_master_user_password` contain shell special characters like `!`, `(`, `*`, `[`, `~`. Never pass them directly on the command line, let `psql` prompt for the password interactively instead, or use `PGPASSWORD` as an environment variable inside a script (used this in `init_db.sh` to automate applying the schema after every apply).
 
 ---
 
-## 8. CI (GitHub Actions)
+## 10. CI (GitHub Actions)
 
-Added a `terraform-validate.yml` workflow, next to the existing one for the Python ingestion tests:
+Added a `terraform-validate.yml` workflow, next to the existing one for the Python ingestion tests. Key detail is `-backend=false` on `terraform init`, since CI has no AWS credentials and does not need any just to validate the code syntax.
 
-```yaml
-- run: terraform fmt -check -recursive
-- run: terraform init -backend=false
-- run: terraform validate
+Once the Lambda Layer entered the picture, `terraform validate` started failing in CI with:
 ```
-
-The key detail is `-backend=false`. CI has no AWS credentials, and it does not need any just to validate the code. This flag tells `init` to download the providers without trying to reach the real S3 backend. There is no `terraform plan` in CI, since that would need real AWS credentials to inspect the current infrastructure. `validate` plus `fmt` is enough of a signal for this stage.
-
----
-
-## 9. Tags
-
-Added through `default_tags` inside the `provider "aws"` block, instead of repeating `tags = {...}` on every single resource:
-
-```hcl
-provider "aws" {
-  region = "eu-west-1"
-
-  default_tags {
-    tags = {
-      Project   = "music-analytics-platform"
-      ManagedBy = "terraform"
-      Component = "iam-rds" # or "bootstrap", depending on the file
-    }
-  }
-}
+Call to function "filebase64sha256" failed: open lambda_layer/layer.zip: no such file or directory
 ```
+`lambda_layer/` is gitignored (it is a generated artifact, not source code), so it simply does not exist when CI checks out a fresh copy of the repo. Fixed by adding a step to the workflow that rebuilds the Layer zip in the runner before `validate` runs, using the same commands as `build_layer.sh`.
 
-This applies automatically to every resource that supports tags. Resources without a tags concept, like `aws_s3_bucket_public_access_block`, just ignore it, no error.
+The important part is that `filebase64sha256()` needs the file to exist. `terraform validate` normally does not need the real contents of the Layer, but Terraform still evaluates the function and fails if the file is missing. Building a throwaway copy in CI is therefore enough for `validate` to run successfully.
 
 ---
 
-## 10. Things still pending
+## 11. Tags
+
+Added through `default_tags` inside the `provider "aws"` block, instead of repeating `tags = {...}` on every single resource. Applies automatically to every resource that supports tags. Resources without a tags concept, like `aws_s3_bucket_public_access_block`, just ignore it, no error.
+
+---
+
+## 12. Things still pending
 
 Add the Grafana Cloud ingress rule manually before each demo session (ADR 08), fetching the current IPs with:
 ```bash
 curl -s https://allowlists.<region>.grafana.net/v1/grafana
 ```
 
-Lambda plus EventBridge module, not written yet.
+EventBridge, to trigger the Lambda on a daily schedule instead of invoking it by hand.
 
-Modularize this single file configuration into `modules/iam/`, `modules/rds/`, `modules/lambda/`. Planned as a separate PR once the Lambda module also exists, instead of modularizing twice.
+Modularize this single file configuration into `modules/iam/`, `modules/rds/`, `modules/lambda/`, planned as its own PR now that Lambda is also in place.

@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 
   backend "s3" {
@@ -138,10 +142,20 @@ resource "aws_security_group" "rds_security_group" {
   vpc_id      = data.aws_vpc.default.id
 }
 
-# My own IP, so I can connect with psql / run the ingestion script locally.
+# My own IP, kept for convenience when connecting with psql locally.
+# Technically redundant with allow_lambda below, which already opens
+# this port to all IPs, but keeping both documents the original intent.
 resource "aws_vpc_security_group_ingress_rule" "allow_postgres" {
   security_group_id = aws_security_group.rds_security_group.id
   cidr_ipv4         = "79.116.239.17/32" # See ADR 03
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "allow_lambda" {
+  security_group_id = aws_security_group.rds_security_group.id
+  cidr_ipv4         = "0.0.0.0/0" # Lambda has no fixed IP without a VPC + NAT Gateway (cost), see ADR 0010
   ip_protocol       = "tcp"
   from_port         = 5432
   to_port           = 5432
@@ -186,6 +200,48 @@ resource "aws_db_instance" "rds_db" {
   vpc_security_group_ids      = [aws_security_group.rds_security_group.id]
   publicly_accessible         = true
   skip_final_snapshot         = true
+}
+
+# ============================================================
+# Lambda Ingestion Function
+# ============================================================
+
+# source_code_hash forces Terraform to detect changes to the zip content,
+# not just its filename. Without it, rebuilding layer.zip with different
+# dependencies wouldn't trigger a new Layer version on apply.
+resource "aws_lambda_layer_version" "lambda_function_dependencies" {
+  filename         = "./lambda_layer/layer.zip"
+  layer_name       = "lambda_function_dependencies"
+  source_code_hash = filebase64sha256("./lambda_layer/layer.zip") # Look if dependencies changed since last time
+
+  compatible_runtimes = ["python3.10"]
+}
+
+# Zips script.py automatically on every plan/apply, so there's no need to
+# manually rebuild the code package by hand like layer.zip (which only
+# changes when dependencies change, not on every code edit).
+data "archive_file" "lambda_code" {
+  type        = "zip"
+  source_file = "./modules/lambda_src/script.py"
+  output_path = "./modules/lambda_src/function.zip"
+}
+
+resource "aws_lambda_function" "ingestion_lambda_function" {
+  filename         = data.archive_file.lambda_code.output_path
+  function_name    = "ingestion_lambda_function"
+  role             = aws_iam_role.lambda_role.arn
+  runtime          = "python3.10"
+  handler          = "script.lambda_handler"
+  source_code_hash = data.archive_file.lambda_code.output_base64sha256
+  timeout          = 300
+  layers           = [aws_lambda_layer_version.lambda_function_dependencies.arn]
+
+  environment {
+    variables = {
+      DB_HOST       = aws_db_instance.rds_db.address
+      DB_SECRET_ARN = aws_db_instance.rds_db.master_user_secret[0].secret_arn
+    }
+  }
 }
 
 # ============================================================

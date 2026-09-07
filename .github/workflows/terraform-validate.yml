@@ -18,6 +18,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build Lambda layer (needed for terraform validate to compute its hash)
+        run: |
+          mkdir -p lambda_layer/python
+          pip install -r requirements.txt -t lambda_layer/python/
+          cd lambda_layer
+          zip -r layer.zip python
+          cd ..
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:

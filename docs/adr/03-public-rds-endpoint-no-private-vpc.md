@@ -1,6 +1,6 @@
 # ADR 03: Use a public RDS endpoint instead of a private VPC
 
-**Status: Accepted**
+**Status: Superseded by [ADR 0010](./10-open-rds-ingress-for-lambda.md)**
 
 ---
 

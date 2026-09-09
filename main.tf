@@ -161,16 +161,25 @@ resource "aws_vpc_security_group_ingress_rule" "allow_lambda" {
   to_port           = 5432
 }
 
-# Grafana Cloud's IP ranges are fetched on-demand before each demo
-# session instead of hardcoded here. See ADR 08 for the reasoning
-# and the exact command to fetch them.
-# resource "aws_vpc_security_group_ingress_rule" "allow_grafana" {
-#     security_group_id = aws_security_group.rds_security_group.id
-#     cidr_ipv4 = "pending" # fetch from Grafana Allowlist API, see ADR 08
-#     ip_protocol = "tcp"
-#     from_port = 5432
-#     to_port = 5432
-# }
+# Grafana Cloud's egress IPs, fetched on-demand right before this session
+# via its Allowlist API (see ADR 08). These change over time, so this
+# block is meant to be updated/reapplied before each demo, not left
+# permanently as-is.
+resource "aws_vpc_security_group_ingress_rule" "allow_grafana_1" {
+  security_group_id = aws_security_group.rds_security_group.id
+  cidr_ipv4         = "54.217.8.12/32"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "allow_grafana_2" {
+  security_group_id = aws_security_group.rds_security_group.id
+  cidr_ipv4         = "52.49.102.231/32"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
 
 # Security Groups block all outbound traffic by default unless
 # explicitly allowed. This opens all outbound traffic, since the

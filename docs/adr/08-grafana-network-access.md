@@ -21,7 +21,7 @@ Since the project follows an on-demand deployment strategy (see ADR 06) and does
 Before each demo/capture session, Grafana Cloud's current egress IPs are fetched using its Allowlist API:
 
 ```
-curl -s https://allowlists.prod-eu-west-2.grafana.net/v1/grafana
+curl -s https://allowlists.prod-eu-west-6.grafana.net/v1/grafana
 ```
 
 The resulting CIDR ranges are added to the aws_vpc_security_group_ingress_rule for RDS. After applying the changes, the screenshots are taken and terraform destroy is run to remove the infrastructure.

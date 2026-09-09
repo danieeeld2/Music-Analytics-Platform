@@ -245,6 +245,40 @@ resource "aws_lambda_function" "ingestion_lambda_function" {
 }
 
 # ============================================================
+# EventBridge (CloudWatch)
+# ============================================================
+
+# Scheduled rule instead of a cron expression, since there's no need for
+# a specific time of day, just once every 24 hours
+resource "aws_cloudwatch_event_rule" "lambda_event_rule" {
+  name                = "lambda-event-rule"
+  description         = "Triggers Lambda Event Rule"
+  region              = "eu-west-1"
+  schedule_expression = "rate(1 day)" // or "cron(0 8 * * ? *)"
+}
+
+# Connects the rule to the Lambda function. This alone does NOT grant
+# EventBridge permission to actually invoke it, that's the separate
+# aws_lambda_permission resource below.
+resource "aws_cloudwatch_event_target" "target_lambda" {
+  region = "eu-west-1"
+  arn    = aws_lambda_function.ingestion_lambda_function.arn
+  rule   = aws_cloudwatch_event_rule.lambda_event_rule.name
+}
+
+# Without this, EventBridge has no permission to invoke the Lambda, even
+# though the rule and target above are correctly configured. source_arn
+# scopes this permission to this specific rule only, not any EventBridge
+# rule in the account.
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingestion_lambda_function.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.lambda_event_rule.arn
+}
+
+# ============================================================
 # Outputs
 # ============================================================
 

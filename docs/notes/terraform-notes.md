@@ -312,9 +312,7 @@ Once the Lambda Layer entered the picture, `terraform validate` started failing 
 ```
 Call to function "filebase64sha256" failed: open lambda_layer/layer.zip: no such file or directory
 ```
-`lambda_layer/` is gitignored (it is a generated artifact, not source code), so it simply does not exist when CI checks out a fresh copy of the repo. Fixed by adding a step to the workflow that rebuilds the Layer zip in the runner before `validate` runs, using the same commands as `build_layer.sh`.
-
-The important part is that `filebase64sha256()` needs the file to exist. `terraform validate` normally does not need the real contents of the Layer, but Terraform still evaluates the function and fails if the file is missing. Building a throwaway copy in CI is therefore enough for `validate` to run successfully.
+`lambda_layer/` is gitignored (it is a generated artifact, not source code), so it simply does not exist when CI checks out a fresh copy of the repo. Fixed by adding a step to the workflow that rebuilds the Layer zip in the runner before `validate` runs, same commands as `build_layer.sh`. `validate` only checks the Terraform is internally consistent, it does not care whether the zip's actual content makes sense, so building even a "throwaway" copy of it in CI is enough.
 
 ---
 
@@ -324,13 +322,71 @@ Added through `default_tags` inside the `provider "aws"` block, instead of repea
 
 ---
 
-## 12. Things still pending
+## 12. EventBridge, daily trigger
 
-Add the Grafana Cloud ingress rule manually before each demo session (ADR 08), fetching the current IPs with:
+Three resources needed, and it's easy to forget the third one:
+
+`aws_cloudwatch_event_rule` — the schedule itself. Went with `schedule_expression = "rate(1 day)"` instead of a cron expression, since there's no need for a specific time of day. AWS cron syntax has 6 fields (not 5 like standard Linux cron), and needs a `?` in either the day-of-month or day-of-week field, can't have `*` in both at once. Didn't need to deal with that at all by using `rate()`.
+
+`aws_cloudwatch_event_target` — connects the rule to the Lambda, just references both by name/ARN.
+
+`aws_lambda_permission` — the one that's easy to skip. Without this, EventBridge has no actual permission to invoke the Lambda, even with the rule and target both configured correctly. `source_arn` scopes the permission to this specific rule only, not to any EventBridge rule in the account.
+
+No real problems here, this part went smoothly once the Lambda itself was already working from the previous PR.
+
+---
+
+## 13. Grafana Cloud data source and dashboard
+
+### PDC (Private Data Source Connect) doesn't apply here
+
+Grafana Cloud can't reach databases on private IP ranges directly, you'd need PDC (a secure tunnel) for that. Since RDS here is public (ADR 03), none of this applies, the regular IP allowlist approach is enough.
+
+### TLS/SSL Mode
+
+RDS requires at least `require` mode. This is Grafana's default when adding a PostgreSQL data source, so no changes needed there. `verify-full` would need managing RDS's certificates, not worth it for this project.
+
+### Dedicated read-only user instead of the RDS master user
+
+Grafana's own docs are explicit about this: Grafana does not validate the safety of queries, so whoever has the credentials could run harmful SQL like `DROP TABLE`. Created a `grafanareader` user with only `SELECT` on the three tables, instead of pointing the data source at the master user. Automated with `init_grafana_user.sh`, generates a fresh password every run and prints it at the end. See ADR 11.
+
+### Grafana Cloud's egress IPs, same problem as before
+
+Same situation as the Lambda/RDS ingress issue really. Grafana Cloud connects from published IPs that can change, fetched from an allowlist API, same idea as ADR 08 describes:
+
 ```bash
-curl -s https://allowlists.<region>.grafana.net/v1/grafana
+curl -s https://allowlists.prod-eu-west-6.grafana.net/v1/grafana
 ```
 
-EventBridge, to trigger the Lambda on a daily schedule instead of invoking it by hand.
+Returns two IPs currently. Added as two separate `aws_vpc_security_group_ingress_rule` resources, since each one only takes a single `cidr_ipv4`, can't pass a list.
 
-Modularize this single file configuration into `modules/iam/`, `modules/rds/`, `modules/lambda/`, planned as its own PR now that Lambda is also in place.
+### Format: Table vs Format: Time series, the thing that confused me most here
+
+First panel I built in Explore showed "Data outside time range" and a weird graph with `track_id` plotted as if it were a numeric value. The actual issue: the query editor defaults to **Format: Table**, and under that format Grafana doesn't know which column is meant to be time vs a value vs a label, it just shows whatever comes back.
+
+Switching to **Format: Time series** fixed it immediately, once Grafana knows this is a time series query, it correctly uses the `time`-aliased column for the X axis and treats other numeric columns as values, string columns as series labels.
+
+Two small things that helped:
+- Aliasing the date column `AS time` explicitly, rather than relying on Grafana to guess from `snapshot_date`.
+- Casting `track_id::text` so Grafana treats it as a label (one line per track) instead of trying to plot it as a number.
+
+```sql
+SELECT
+    snapshot_date AS time,
+    playback_count,
+    track_id::text AS track_id
+FROM track_snapshots
+ORDER BY snapshot_date
+```
+
+### Only one data point so far
+
+Since ingestion has only run a handful of times manually, each series shows isolated points rather than connected lines. This will fill in naturally once EventBridge has been running daily for a while.
+
+---
+
+## 14. Things still pending
+
+Let this run for a few days with EventBridge actually triggering it, to get a dashboard with real connected lines instead of single points, for better screenshots.
+
+Modularize the single `main.tf` into `modules/iam/`, `modules/rds/`, `modules/lambda/`, still planned as its own PR.

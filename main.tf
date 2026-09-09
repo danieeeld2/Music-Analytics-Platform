@@ -161,16 +161,25 @@ resource "aws_vpc_security_group_ingress_rule" "allow_lambda" {
   to_port           = 5432
 }
 
-# Grafana Cloud's IP ranges are fetched on-demand before each demo
-# session instead of hardcoded here. See ADR 08 for the reasoning
-# and the exact command to fetch them.
-# resource "aws_vpc_security_group_ingress_rule" "allow_grafana" {
-#     security_group_id = aws_security_group.rds_security_group.id
-#     cidr_ipv4 = "pending" # fetch from Grafana Allowlist API, see ADR 08
-#     ip_protocol = "tcp"
-#     from_port = 5432
-#     to_port = 5432
-# }
+# Grafana Cloud's egress IPs, fetched on-demand right before this session
+# via its Allowlist API (see ADR 08). These change over time, so this
+# block is meant to be updated/reapplied before each demo, not left
+# permanently as-is.
+resource "aws_vpc_security_group_ingress_rule" "allow_grafana_1" {
+  security_group_id = aws_security_group.rds_security_group.id
+  cidr_ipv4         = "54.217.8.12/32"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "allow_grafana_2" {
+  security_group_id = aws_security_group.rds_security_group.id
+  cidr_ipv4         = "52.49.102.231/32"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
 
 # Security Groups block all outbound traffic by default unless
 # explicitly allowed. This opens all outbound traffic, since the
@@ -242,6 +251,40 @@ resource "aws_lambda_function" "ingestion_lambda_function" {
       DB_SECRET_ARN = aws_db_instance.rds_db.master_user_secret[0].secret_arn
     }
   }
+}
+
+# ============================================================
+# EventBridge (CloudWatch)
+# ============================================================
+
+# Scheduled rule instead of a cron expression, since there's no need for
+# a specific time of day, just once every 24 hours
+resource "aws_cloudwatch_event_rule" "lambda_event_rule" {
+  name                = "lambda-event-rule"
+  description         = "Triggers Lambda Event Rule"
+  region              = "eu-west-1"
+  schedule_expression = "rate(1 day)" // or "cron(0 8 * * ? *)"
+}
+
+# Connects the rule to the Lambda function. This alone does NOT grant
+# EventBridge permission to actually invoke it, that's the separate
+# aws_lambda_permission resource below.
+resource "aws_cloudwatch_event_target" "target_lambda" {
+  region = "eu-west-1"
+  arn    = aws_lambda_function.ingestion_lambda_function.arn
+  rule   = aws_cloudwatch_event_rule.lambda_event_rule.name
+}
+
+# Without this, EventBridge has no permission to invoke the Lambda, even
+# though the rule and target above are correctly configured. source_arn
+# scopes this permission to this specific rule only, not any EventBridge
+# rule in the account.
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingestion_lambda_function.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.lambda_event_rule.arn
 }
 
 # ============================================================

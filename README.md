@@ -11,6 +11,7 @@ Turning my SoundCloud stats into an automated analytics dashboard.
 - [Setup / Deployment](#setup--deployment)
 - [What this demonstrates](#what-this-demonstrates)
 - [Screenshots](#screenshots)
+- [Cost](#cost)
 - [License](#license)
 
 ---
@@ -102,6 +103,23 @@ Once deployed, EventBridge triggers the ingestion Lambda automatically once a da
 ![Grafana dashboard — snapshot, plays, and likes](./docs/images/grafana-dashboard-1.png)
 
 ![Grafana dashboard — reposts and followers](./docs/images/grafana-dashboard-2.png)
+
+### Cost
+
+Left the stack running for 5 days to gather real data and checked AWS Cost Explorer:
+
+| Service                  | Cost (5 days) |
+| ------------------------ | ------------: |
+| RDS (`db.t4g.micro`)     |   ~$0.0000006 |
+| Lambda                   |            $0 |
+| Secrets Manager          |           ~$0 |
+| S3 / DynamoDB            |            $0 |
+| EventBridge / CloudWatch |            $0 |
+| **Total**                |     **$0.00** |
+
+The costs were covered by the 12-month free tier on the new AWS account. Outside the free tier, the same 5 days would cost roughly **$1.92**, assuming an RDS price of ~$0.016/hour.
+
+This is still a low cost for short-term deployments, especially with the on-demand deploy and destroy strategy described in ADR 0006.
 
 ### License
 
